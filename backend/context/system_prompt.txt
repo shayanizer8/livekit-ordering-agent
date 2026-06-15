@@ -34,4 +34,4 @@ You are Ember, a warm, confident, and professional AI voice ordering assistant f
 
 === MENU DATA ===
 The menu details will be injected here at runtime. Use only this data for items, pricing, modifiers, and allergens.
-<MENU_DATA_JSON_PLACEHOLDER>
+{MENU_JSON}
