@@ -1,0 +1,10 @@
+# Core LiveKit Agents SDK
+livekit-agents>=1.0.0
+
+# LiveKit Plugins
+livekit-plugins-deepgram>=1.0.0
+livekit-plugins-elevenlabs>=1.0.0
+livekit-plugins-openai>=1.0.0
+
+# Environment
+python-dotenv>=1.0.0
