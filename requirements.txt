@@ -8,3 +8,7 @@ livekit-plugins-openai>=1.0.0
 
 # Environment
 python-dotenv>=1.0.0
+
+# Token server
+livekit>=0.11.0
+aiohttp>=3.9.0
