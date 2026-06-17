@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 from pathlib import Path
@@ -5,7 +6,7 @@ from dotenv import load_dotenv
 
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool
 from livekit.agents.voice import Agent, AgentSession
-from livekit.plugins import deepgram, elevenlabs, openai
+from livekit.plugins import deepgram, openai
 from livekit import rtc
 
 from tools import (
@@ -23,6 +24,10 @@ from tools import (
     filter_menu_by_allergen,
     get_item_modifiers,
 )
+
+
+AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "forge-flame-agent")
+DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-andromeda-en")
 
 
 def load_context() -> str:
@@ -46,6 +51,13 @@ class OrderingAgent(Agent):
 
     def __init__(self):
         super().__init__(instructions=load_context())
+
+    async def on_enter(self) -> None:
+        """Greet the guest when the session starts."""
+        await self.session.say(
+            "Welcome to Forge & Flame! I'm Ember, your ordering assistant. "
+            "What can I get started for you today?"
+        )
 
     # For UI changes of cart in real time, we publish cart state updates to a LiveKit data channel.
     def _publish_cart_update(self, cart_state: dict) -> None:
@@ -105,6 +117,18 @@ class OrderingAgent(Agent):
         result = confirm_order()
         if result.get("success"):
             self._publish_cart_update(result["cart"])
+            # Speak the farewell, give TTS time to finish, then close the room.
+            # session.say() is accessed via the bound AgentSession — we schedule
+            # the teardown as a background task so the tool result is returned
+            # to the LLM first (avoiding a blocked response).
+            async def _farewell_and_disconnect() -> None:
+                await self.session.say(
+                    "Your order is confirmed. Thank you for choosing Forge and Flame!"
+                )
+                await asyncio.sleep(3)
+                await self._room.disconnect()
+
+            asyncio.ensure_future(_farewell_and_disconnect())
         return result
 
     @function_tool
@@ -153,28 +177,20 @@ async def entrypoint(ctx: JobContext) -> None:
         session = AgentSession(
             stt=deepgram.STT(model="nova-2", language="en-US"),
             llm=openai.LLM(
-                model="llama-3.3-70b",
-                api_key=os.getenv("CEREBRAS_API_KEY"),
-                base_url="https://api.cerebras.ai/v1",
+                model="llama-3.1-8b-instant",
+                api_key=os.getenv("GROQ_API_KEY"),
+                base_url="https://api.groq.com/openai/v1",
             ),
-            tts=elevenlabs.TTS(
-                voice_id="21m00Tcm4TlvDq8ikWAM",
-                model="eleven_turbo_v2_5",
-                api_key=os.getenv("ELEVENLABS_API_KEY"),
+            tts=deepgram.TTS(
+                model=DEEPGRAM_TTS_MODEL,
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
             ),
         )
 
         agent = OrderingAgent()
 
-        # Start the session with our agent
+        # Start the session with our agent (greeting is sent from on_enter)
         await session.start(agent=agent, room=ctx.room)
-
-        # Send initial greeting from Ember
-        greeting = (
-            "Welcome to Forge & Flame! I'm Ember, your ordering assistant. "
-            "What can I get started for you today?"
-        )
-        await session.say(greeting)
 
     except Exception as e:
         # Clean error handling - log and re-raise
@@ -187,4 +203,4 @@ if __name__ == "__main__":
     load_dotenv()
 
     # Run the agent app with CLI
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=AGENT_NAME))
