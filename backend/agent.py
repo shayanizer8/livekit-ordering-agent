@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Load backend/.env BEFORE importing plugins that may validate API keys at import time.
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool
 from livekit.agents.voice import Agent, AgentSession
-from livekit.plugins import deepgram, openai
+from livekit.plugins import cartesia, deepgram, openai
 from livekit import rtc
 
 from tools import (
@@ -27,11 +30,11 @@ from tools import (
 
 
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "forge-flame-agent")
-DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-andromeda-en")
+CARTESIA_TTS_MODEL = os.getenv("CARTESIA_TTS_MODEL", "sonic-3.5")
 
 
 def load_context() -> str:
-    """Load system prompt and inject menu JSON."""
+    """Load system prompt and inject a compact menu summary."""
     base = Path(__file__).parent
     system_prompt_path = base / "context" / "system_prompt.txt"
     menu_path = base / "context" / "menu.json"
@@ -42,8 +45,49 @@ def load_context() -> str:
     with open(menu_path, "r", encoding="utf-8") as f:
         menu_data = json.load(f)
 
-    menu_json_str = json.dumps(menu_data, indent=2)
-    return system_prompt.replace("{MENU_JSON}", menu_json_str)
+    summary_lines: list[str] = []
+    summary_lines.append(f"Restaurant: {menu_data.get('restaurant', 'Unknown')}")
+    summary_lines.append(f"Currency: {menu_data.get('currency', 'USD')}")
+    summary_lines.append(
+        "Categories: " + ", ".join(menu_data.get("categories", []))
+    )
+    summary_lines.append("")
+    summary_lines.append("Menu reference:")
+
+    for category, items in menu_data.get("menu", {}).items():
+        summary_lines.append(f"{category}:")
+        for item in items:
+            price = item.get("price")
+            if isinstance(price, dict):
+                price_text = ", ".join(f"{key} ${value:.2f}" for key, value in price.items())
+            else:
+                price_text = f"${float(price):.2f}"
+
+            allergens = item.get("allergens", [])
+            modifiers = item.get("available_modifiers", [])
+            summary_lines.append(
+                f"- {item.get('id')} | {item.get('name')} | {price_text}"
+                f" | allergens: {', '.join(allergens) if allergens else 'none'}"
+                f" | modifiers: {', '.join(modifiers) if modifiers else 'none'}"
+            )
+
+    combos = menu_data.get("combos", [])
+    if combos:
+        summary_lines.append("")
+        summary_lines.append("Combos:")
+        for combo in combos:
+            price = combo.get("price")
+            if isinstance(price, dict):
+                price_text = ", ".join(f"{key} ${value:.2f}" for key, value in price.items())
+            else:
+                price_text = f"${float(price):.2f}"
+            summary_lines.append(
+                f"- {combo.get('id')} | {combo.get('name')} | {price_text}"
+                f" | included: {', '.join(combo.get('included', []))}"
+            )
+
+    menu_summary = "\n".join(summary_lines)
+    return system_prompt.replace("{MENU_JSON}", menu_summary)
 
 
 class OrderingAgent(Agent):
@@ -51,6 +95,12 @@ class OrderingAgent(Agent):
 
     def __init__(self):
         super().__init__(instructions=load_context())
+
+    def _get_room(self):
+        room_io = getattr(self.session, "room_io", None)
+        if not room_io:
+            return None
+        return room_io.room
 
     async def on_enter(self) -> None:
         """Greet the guest when the session starts."""
@@ -62,17 +112,26 @@ class OrderingAgent(Agent):
     # For UI changes of cart in real time, we publish cart state updates to a LiveKit data channel.
     def _publish_cart_update(self, cart_state: dict) -> None:
         """Publish cart state to LiveKit room via reliable data channel."""
-        if not self._room:
+        room = self._get_room()
+        if not room:
             return
+        # Transform items to frontend format
+        frontend_items = []
+        for item in cart_state.get("items", []):
+            mods = ", ".join(item.get("modifiers", [])) if item.get("modifiers") else ""
+            frontend_items.append({
+                "name": item.get("name", ""),
+                "modifiers": mods,
+                "price": f"${item.get('subtotal', 0):.2f}",
+            })
         payload = {
             "type": "cart_update",
-            "items": cart_state.get("items", []),
-            "total": cart_state.get("total", 0.0),
+            "items": frontend_items,
+            "total": f"${cart_state.get('total', 0):.2f}",
             "confirmed": cart_state.get("confirmed", False),
         }
         data = json.dumps(payload).encode("utf-8")
-        # Use reliable delivery for cart updates
-        self._room.local_participant.publish_data(data, reliable=True) # .publish_data sends data over a separte data channel not associated with the audio stream.
+        room.local_participant.publish_data(data, reliable=True)
 
     @function_tool
     async def add_item_to_cart(self, item_id: str, quantity: int, size: str, modifiers: list[str]) -> dict:
@@ -126,7 +185,9 @@ class OrderingAgent(Agent):
                     "Your order is confirmed. Thank you for choosing Forge and Flame!"
                 )
                 await asyncio.sleep(3)
-                await self._room.disconnect()
+                room = self._get_room()
+                if room:
+                    await room.disconnect()
 
             asyncio.ensure_future(_farewell_and_disconnect())
         return result
@@ -177,13 +238,13 @@ async def entrypoint(ctx: JobContext) -> None:
         session = AgentSession(
             stt=deepgram.STT(model="nova-2", language="en-US"),
             llm=openai.LLM(
-                model="llama-3.1-8b-instant",
-                api_key=os.getenv("GROQ_API_KEY"),
-                base_url="https://api.groq.com/openai/v1",
+                model="ministral-8b-latest",
+                api_key=os.getenv("MISTRAL_API_KEY"),
+                base_url="https://api.mistral.ai/v1",
             ),
-            tts=deepgram.TTS(
-                model=DEEPGRAM_TTS_MODEL,
-                api_key=os.getenv("DEEPGRAM_API_KEY"),
+            tts=cartesia.TTS(
+                model=CARTESIA_TTS_MODEL,
+                api_key=os.getenv("CARTESIA_API_KEY"),
             ),
         )
 
@@ -199,8 +260,5 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    # Load environment variables from .env
-    load_dotenv()
-
     # Run the agent app with CLI
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=AGENT_NAME))
