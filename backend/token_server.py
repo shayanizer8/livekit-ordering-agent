@@ -97,17 +97,7 @@ async def handle_options(request: web.Request) -> web.Response:  # noqa: ARG001
 
 
 async def handle_token(request: web.Request) -> web.Response:
-    """
-    GET /token
 
-    Query parameters:
-        identity  – participant identity   (default: "user")
-        room      – LiveKit room name      (default: "ordering-room")
-
-    Returns:
-        200  { "token": "<jwt>", "url": "<wss://...>" }
-        500  { "error": "<message>" }
-    """
     identity: str = request.rel_url.query.get("identity", "user") or "user"
     room: str = request.rel_url.query.get("room", "ordering-room") or "ordering-room"
 
@@ -129,7 +119,7 @@ async def handle_token(request: web.Request) -> web.Response:
                     agents=[RoomAgentDispatch(agent_name=LIVEKIT_AGENT_NAME)],
                 )
             )
-            .with_ttl(datetime.timedelta(hours=2))
+            .with_ttl(datetime.timedelta(hours=1))
             .to_jwt()
         )
 
