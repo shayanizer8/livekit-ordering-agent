@@ -19,6 +19,7 @@ from tools import (
     add_combo_to_cart,
     get_cart_summary,
     confirm_order,
+    set_cart_scope,
     search_menu,
     get_item_details,
     get_category_items,
@@ -102,6 +103,11 @@ class OrderingAgent(Agent):
             return None
         return room_io.room
 
+    def _set_cart_scope(self) -> None:
+        room = self._get_room()
+        room_name = getattr(room, "name", None) if room else None
+        set_cart_scope(room_name or "default")
+
     async def on_enter(self) -> None:
         """Greet the guest when the session starts."""
         await self.session.say(
@@ -110,7 +116,7 @@ class OrderingAgent(Agent):
         )
 
     # For UI changes of cart in real time, we publish cart state updates to a LiveKit data channel.
-    def _publish_cart_update(self, cart_state: dict) -> None:
+    async def _publish_cart_update(self, cart_state: dict) -> None:
         """Publish cart state to LiveKit room via reliable data channel."""
         room = self._get_room()
         if not room:
@@ -131,51 +137,57 @@ class OrderingAgent(Agent):
             "confirmed": cart_state.get("confirmed", False),
         }
         data = json.dumps(payload).encode("utf-8")
-        room.local_participant.publish_data(data, reliable=True)
+        await room.local_participant.publish_data(data, reliable=True)
 
     @function_tool
     async def add_item_to_cart(self, item_id: str, quantity: int, size: str, modifiers: list[str]) -> dict:
         """Add a menu item to the cart and sync state."""
+        self._set_cart_scope()
         result = add_item_to_cart(item_id, quantity, size, modifiers)
         if result.get("success"):
-            self._publish_cart_update(result["cart"])
+            await self._publish_cart_update(result["cart"])
         return result
 
     @function_tool
     async def remove_item_from_cart(self, item_id: str, modifiers: list[str]) -> dict:
         """Remove an item from the cart and sync state."""
+        self._set_cart_scope()
         result = remove_item_from_cart(item_id, modifiers)
         if result.get("success"):
-            self._publish_cart_update(result["cart"])
+            await self._publish_cart_update(result["cart"])
         return result
 
     @function_tool
     async def modify_item_in_cart(self, item_id: str, old_modifiers: list[str], new_modifiers: list[str], new_size: str) -> dict:
         """Modify an existing cart item and sync state."""
+        self._set_cart_scope()
         result = modify_item_in_cart(item_id, old_modifiers, new_modifiers, new_size)
         if result.get("success"):
-            self._publish_cart_update(result["cart"])
+            await self._publish_cart_update(result["cart"])
         return result
 
     @function_tool
     async def add_combo_to_cart(self, combo_id: str, burger_id: str, side_upgrade: str, drink_upgrade: str) -> dict:
         """Add a combo meal to the cart and sync state."""
+        self._set_cart_scope()
         result = add_combo_to_cart(combo_id, burger_id, side_upgrade, drink_upgrade)
         if result.get("success"):
-            self._publish_cart_update(result["cart"])
+            await self._publish_cart_update(result["cart"])
         return result
 
     @function_tool
     async def get_cart_summary(self) -> dict:
         """Return current cart contents without modifying state."""
+        self._set_cart_scope()
         return get_cart_summary()
 
     @function_tool
     async def confirm_order(self) -> dict:
         """Finalize the order and sync confirmed state."""
+        self._set_cart_scope()
         result = confirm_order()
         if result.get("success"):
-            self._publish_cart_update(result["cart"])
+            await self._publish_cart_update(result["cart"])
             # Speak the farewell, give TTS time to finish, then close the room.
             # session.say() is accessed via the bound AgentSession — we schedule
             # the teardown as a background task so the tool result is returned
@@ -227,6 +239,20 @@ class OrderingAgent(Agent):
         """Get available customization modifiers for an item."""
         return get_item_modifiers(item_id)
 
+    async def handle_client_data(self, payload: bytes) -> None:
+        """Handle incoming room data messages from the frontend."""
+        self._set_cart_scope()
+        try:
+            message = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return
+
+        if not isinstance(message, dict):
+            return
+
+        if message.get("type") == "confirm_order":
+            await self.confirm_order()
+
 
 async def entrypoint(ctx: JobContext) -> None:
     """Main entrypoint: connect to room, start session, send initial greeting."""
@@ -249,9 +275,18 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
         agent = OrderingAgent()
+        room = ctx.room
+
+        def _on_room_data(data_packet) -> None:
+            payload = getattr(data_packet, "data", None)
+            if not isinstance(payload, (bytes, bytearray, memoryview)):
+                return
+            asyncio.create_task(agent.handle_client_data(bytes(payload)))
+
+        room.on("data_received", _on_room_data)
 
         # Start the session with our agent (greeting is sent from on_enter)
-        await session.start(agent=agent, room=ctx.room)
+        await session.start(agent=agent, room=room)
 
     except Exception as e:
         # Clean error handling - log and re-raise
