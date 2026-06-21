@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Load backend/.env BEFORE importing plugins that may validate API keys at import time.
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool
+from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool, inference
 from livekit.agents.voice import Agent, AgentSession
 from livekit.plugins import cartesia, deepgram, openai
 from livekit import rtc
@@ -32,6 +32,34 @@ from tools import (
 
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "forge-flame-agent")
 CARTESIA_TTS_MODEL = os.getenv("CARTESIA_TTS_MODEL", "sonic-3.5")
+SILERO_VAD_ACTIVATION_THRESHOLD = float(
+    os.getenv("SILERO_VAD_ACTIVATION_THRESHOLD", "0.5")
+)
+TURN_DETECTOR_VERSION = os.getenv("LIVEKIT_TURN_DETECTOR_VERSION")
+LIVEKIT_INFERENCE_URL = os.getenv("LIVEKIT_INFERENCE_URL")
+LIVEKIT_INFERENCE_API_KEY = os.getenv("LIVEKIT_INFERENCE_API_KEY")
+LIVEKIT_INFERENCE_API_SECRET = os.getenv("LIVEKIT_INFERENCE_API_SECRET")
+
+
+def build_vad() -> inference.VAD:
+    return inference.VAD(
+        model="silero",
+        activation_threshold=SILERO_VAD_ACTIVATION_THRESHOLD,
+    )
+
+
+def build_turn_detector() -> inference.TurnDetector:
+    detector_kwargs: dict[str, str] = {}
+    if TURN_DETECTOR_VERSION:
+        detector_kwargs["version"] = TURN_DETECTOR_VERSION
+    elif LIVEKIT_INFERENCE_URL and LIVEKIT_INFERENCE_API_KEY and LIVEKIT_INFERENCE_API_SECRET:
+        detector_kwargs["version"] = "v1"
+        detector_kwargs["base_url"] = LIVEKIT_INFERENCE_URL
+        detector_kwargs["api_key"] = LIVEKIT_INFERENCE_API_KEY
+        detector_kwargs["api_secret"] = LIVEKIT_INFERENCE_API_SECRET
+    else:
+        detector_kwargs["version"] = "v1-mini"
+    return inference.TurnDetector(**detector_kwargs)
 
 
 def load_context() -> str:
@@ -127,6 +155,7 @@ class OrderingAgent(Agent):
             mods = ", ".join(item.get("modifiers", [])) if item.get("modifiers") else ""
             frontend_items.append({
                 "name": item.get("name", ""),
+                "quantity": item.get("quantity", 1),
                 "modifiers": mods,
                 "price": f"${item.get('subtotal', 0):.2f}",
             })
@@ -263,6 +292,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # Initialize AgentSession with STT, LLM, TTS pipeline
         session = AgentSession(
             stt=deepgram.STT(model="nova-2", language="en-US"),
+            vad=build_vad(),
             llm=openai.LLM(
                 model="ministral-8b-latest",
                 api_key=os.getenv("MISTRAL_API_KEY"),
@@ -272,6 +302,22 @@ async def entrypoint(ctx: JobContext) -> None:
                 model=CARTESIA_TTS_MODEL,
                 api_key=os.getenv("CARTESIA_API_KEY"),
             ),
+            turn_handling={
+                "turn_detection": build_turn_detector(),
+                "endpointing": {
+                    "mode": "fixed",
+                    "min_delay": 0.6,
+                    "max_delay": 3.0,
+                },
+                "interruption": {
+                    "enabled": True,
+                    "mode": "adaptive",
+                    "discard_audio_if_uninterruptible": True,
+                    "min_duration": 0.5,
+                    "resume_false_interruption": True,
+                    "false_interruption_timeout": 2.0,
+                },
+            },
         )
 
         agent = OrderingAgent()
