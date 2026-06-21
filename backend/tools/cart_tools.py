@@ -9,14 +9,30 @@ cart state in memory and interacts with the restaurant's menu data.
 import json
 import os
 import re
+from contextvars import ContextVar
 from typing import Any
 
-# Global Cart State
-cart: dict[str, Any] = {
-    "items": [],
-    "total": 0.00,
-    "confirmed": False
-}
+_cart_scope: ContextVar[str] = ContextVar("cart_scope", default="default")
+_cart_store: dict[str, dict[str, Any]] = {}
+
+
+def _default_cart() -> dict[str, Any]:
+    return {
+        "items": [],
+        "total": 0.0,
+        "confirmed": False,
+    }
+
+
+def set_cart_scope(scope: str | None) -> None:
+    _cart_scope.set(scope or "default")
+
+
+def _get_cart() -> dict[str, Any]:
+    scope = _cart_scope.get()
+    if scope not in _cart_store:
+        _cart_store[scope] = _default_cart()
+    return _cart_store[scope]
 
 # Default Combo mappings for fallback/resolutions
 DEFAULT_COMBO_SIDES = {
@@ -55,6 +71,7 @@ def _recalculate_total() -> None:
     Iterates over all items in the cart and recalculates cart["total"] by summing
     all item subtotals. Updates subtotals for each item as well.
     """
+    cart = _get_cart()
     total = 0.0
     for item in cart["items"]:
         item["subtotal"] = round(item["unit_price"] * item["quantity"], 2)
@@ -192,6 +209,7 @@ def add_item_to_cart(item_id: str, quantity: int, size: str, modifiers: list[str
             - cart (dict): The entire updated cart state.
     """
     try:
+        cart = _get_cart()
         # Check if cart is finalized
         if cart["confirmed"]:
             return {
@@ -283,6 +301,7 @@ def remove_item_from_cart(item_id: str, modifiers: list[str]) -> dict[str, Any]:
         A dictionary with success status, details message, and the updated cart state.
     """
     try:
+        cart = _get_cart()
         if cart["confirmed"]:
             return {
                 "success": False,
@@ -346,6 +365,7 @@ def modify_item_in_cart(item_id: str, old_modifiers: list[str], new_modifiers: l
         A dictionary with success status, details message, and the updated cart state.
     """
     try:
+        cart = _get_cart()
         if cart["confirmed"]:
             return {
                 "success": False,
@@ -427,6 +447,7 @@ def add_combo_to_cart(combo_id: str, burger_id: str, side_upgrade: str, drink_up
         A dictionary with success status, details message, and the updated cart state.
     """
     try:
+        cart = _get_cart()
         if cart["confirmed"]:
             return {
                 "success": False,
@@ -541,6 +562,7 @@ def get_cart_summary() -> dict[str, Any]:
         A dictionary with success status, details message, and the current cart state.
     """
     try:
+        cart = _get_cart()
         return {
             "success": True,
             "message": "Cart summary retrieved successfully.",
@@ -563,6 +585,7 @@ def confirm_order() -> dict[str, Any]:
         A dictionary with success status, details message, and the final cart state.
     """
     try:
+        cart = _get_cart()
         if cart["confirmed"]:
             return {
                 "success": False,
