@@ -27,6 +27,7 @@ const BASE_HEIGHTS = [
 
 interface CartItem {
   name: string;
+  quantity: number;
   modifiers: string;
   price: string;
 }
@@ -72,6 +73,8 @@ function App() {
     total: '$0.00',
     confirmed: false,
   });
+  const [confirmPending, setConfirmPending] = useState(false);
+  const [orderId, setOrderId] = useState('');
   const [connError, setConnError] = useState<string | null>(null);
   const [sessionEnded, setSessionEnded] = useState(false);
   const [sessionKey, setSessionKey] = useState(0); // incremented to force reconnect
@@ -135,6 +138,9 @@ function App() {
                   total: (msg.total as string) ?? '$0.00',
                   confirmed: Boolean(msg.confirmed),
                 });
+                if (msg.confirmed) {
+                  setConfirmPending(false);
+                }
               }
 
               // Optional: agent explicitly broadcasts its state
@@ -175,7 +181,9 @@ function App() {
 
         // ── Room disconnected (agent farewell complete) ────────────────────
         livekitRoom.on(RoomEvent.Disconnected, () => {
+          if (roomRef.current !== livekitRoom) return;
           stopPolling();
+          setConfirmPending(false);
           setRoom(null);
           setSessionEnded(true);
           setMicEnabled(false);
@@ -228,8 +236,15 @@ function App() {
   // ── New session reset ──────────────────────────────────────────────────────
 
   const handleNewSession = useCallback(() => {
+    const currentRoom = roomRef.current;
+    roomRef.current = null;
+    if (currentRoom) {
+      void currentRoom.disconnect();
+    }
     setSessionEnded(false);
     setCart({ items: [], total: '$0.00', confirmed: false });
+    setConfirmPending(false);
+    setOrderId('');
     setTranscript('');
     setStatus('Listening');
     setAudioLevel(0);
@@ -262,17 +277,28 @@ function App() {
 
   const handleConfirmOrder = useCallback(async () => {
     const room = roomRef.current;
-    if (!room || cart.confirmed) return;
+    if (!room || cart.confirmed || confirmPending) return;
 
     try {
+      setConfirmPending(true);
+      setStatus('Thinking');
       const payload = new TextEncoder().encode(
         JSON.stringify({ type: 'confirm_order' }),
       );
       await room.localParticipant.publishData(payload, { reliable: true });
-      setCart((prev) => ({ ...prev, confirmed: true }));
-      setStatus('Thinking');
     } catch (err) {
+      setConfirmPending(false);
       console.error('[LiveKit] publishData failed:', err);
+    }
+  }, [cart.confirmed, confirmPending]);
+
+  useEffect(() => {
+    if (cart.confirmed) {
+      const timestamp = Date.now().toString(36).toUpperCase();
+      const randomSuffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+      setOrderId(`FF-${timestamp}-${randomSuffix}`);
+    } else {
+      setOrderId('');
     }
   }, [cart.confirmed]);
 
@@ -288,7 +314,7 @@ function App() {
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   // ── Session-ended confirmation screen ─────────────────────────────────────
-  if (sessionEnded) {
+  if (sessionEnded || cart.confirmed) {
     return (
       <main className="screen-shell" style={{ display: 'flex' }}>
         <div
@@ -356,6 +382,103 @@ function App() {
               <span style={{ color: '#e9a447' }}>Forge &amp; Flame</span>. Your
               order is on its way.
             </p>
+          </div>
+
+          <div
+            style={{
+              width: 'min(100%, 520px)',
+              border: '1px solid rgba(233,164,71,0.18)',
+              borderRadius: '18px',
+              padding: '18px 20px',
+              background: 'rgba(18, 16, 14, 0.55)',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.18)',
+              textAlign: 'left',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '14px',
+                gap: '12px',
+              }}
+            >
+              <span
+                style={{
+                  color: '#9b8f83',
+                  fontSize: '0.78rem',
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                }}
+              >
+                Order summary
+              </span>
+              <strong style={{ color: '#ece5db', fontSize: '1rem' }}>
+                {cart.total}
+              </strong>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {cart.items.map((item, index) => (
+                <div
+                  key={`${item.name}-${index}`}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    paddingBottom: '10px',
+                    borderBottom:
+                      index === cart.items.length - 1
+                        ? 'none'
+                        : '1px solid rgba(255,255,255,0.08)',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <span style={{ color: '#ece5db', fontWeight: 600 }}>
+                      {item.quantity}× {item.name}
+                    </span>
+                    {item.modifiers ? (
+                      <span style={{ color: '#9b8f83', fontSize: '0.9rem' }}>
+                        {item.modifiers}
+                      </span>
+                    ) : null}
+                  </div>
+                  <strong style={{ color: '#e9a447', whiteSpace: 'nowrap' }}>
+                    {item.price}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+              alignItems: 'center',
+            }}
+          >
+            <span
+              style={{
+                color: '#9b8f83',
+                fontSize: '0.82rem',
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+              }}
+            >
+              Order ID
+            </span>
+            <strong
+              style={{
+                color: '#ece5db',
+                fontSize: '1rem',
+                letterSpacing: '0.12em',
+              }}
+            >
+              {orderId}
+            </strong>
           </div>
 
           <button
@@ -463,7 +586,9 @@ function App() {
               style={{ ['--item-delay' as string]: `${index * 0.08}s` }}
             >
               <div className="cart-item__copy">
-                <h3>{item.name}</h3>
+                <h3>
+                  {item.quantity}× {item.name}
+                </h3>
                 <p>{item.modifiers}</p>
               </div>
               <div className="cart-item__price">{item.price}</div>
@@ -485,13 +610,13 @@ function App() {
           </div>
 
           <button
-            className={`confirm-button${cart.confirmed ? ' confirm-button--loading' : ''}`}
+            className={`confirm-button${confirmPending ? ' confirm-button--loading' : ''}`}
             type="button"
             onClick={() => void handleConfirmOrder()}
-            disabled={cart.confirmed}
-            aria-busy={cart.confirmed}
+            disabled={cart.confirmed || confirmPending}
+            aria-busy={confirmPending}
           >
-            {cart.confirmed ? 'Confirming...' : 'Confirm order'}
+            {confirmPending ? 'Confirming...' : 'Confirm order'}
           </button>
 
           <p className="order-note">
