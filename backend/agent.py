@@ -218,19 +218,15 @@ class OrderingAgent(Agent):
         if result.get("success"):
             await self._publish_cart_update(result["cart"])
             # Speak the farewell, give TTS time to finish, then close the room.
-            # session.say() is accessed via the bound AgentSession — we schedule
-            # the teardown as a background task so the tool result is returned
-            # to the LLM first (avoiding a blocked response).
-            async def _farewell_and_disconnect() -> None:
-                await self.session.say(
-                    "Your order is confirmed. Thank you for choosing Forge and Flame!"
-                )
-                await asyncio.sleep(3)
+
+            async def _disconnect_after_delay() -> None:
+            # Give the LLM 5 seconds to say its farewell before hanging up
+                await asyncio.sleep(7) 
                 room = self._get_room()
                 if room:
                     await room.disconnect()
 
-            asyncio.ensure_future(_farewell_and_disconnect())
+            asyncio.ensure_future(_disconnect_after_delay())
         return result
 
     @function_tool
