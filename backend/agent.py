@@ -1,16 +1,20 @@
 import asyncio
 import os
 import json
+import logging
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Load backend/.env BEFORE importing plugins that may validate API keys at import time.
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool, inference
+from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, function_tool, inference, metrics
 from livekit.agents.voice import Agent, AgentSession
 from livekit.plugins import cartesia, deepgram, openai
 from livekit import rtc
+
+logger = logging.getLogger("voice-agent")
 
 from tools import (
     add_item_to_cart,
@@ -285,15 +289,39 @@ async def entrypoint(ctx: JobContext) -> None:
         # Connect to LiveKit room with audio-only subscription
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
+        # Initialize the LLM with metrics monitoring
+        llm = openai.LLM(
+            model="ministral-8b-latest",
+            api_key=os.getenv("MISTRAL_API_KEY"),
+            base_url="https://api.mistral.ai/v1",
+        )
+
+        @llm.on("metrics_collected")
+        def on_llm_metrics(m: metrics.LLMMetrics):
+            logger.info(
+                "LLM Call Metrics: request_id=%s, prompt_tokens=%d, prompt_cached_tokens=%d, completion_tokens=%d, total_tokens=%d, duration=%.3fs, ttft=%.3fs",
+                m.request_id,
+                m.prompt_tokens,
+                m.prompt_cached_tokens,
+                m.completion_tokens,
+                m.total_tokens,
+                m.duration,
+                m.ttft,
+            )
+            # Enforce context window limit of 7000 tokens.
+            # Truncate history to preserve prompt cache and LLM response sanity.
+            if m.total_tokens > 7000:
+                logger.info(
+                    "Context window total tokens (%d) exceeded 7,000. Truncating conversation history to last 20 items...",
+                    m.total_tokens,
+                )
+                session.history.truncate(max_items=20)
+
         # Initialize AgentSession with STT, LLM, TTS pipeline
         session = AgentSession(
             stt=deepgram.STT(model="nova-2", language="en-US"),
             vad=build_vad(),
-            llm=openai.LLM(
-                model="ministral-8b-latest",
-                api_key=os.getenv("MISTRAL_API_KEY"),
-                base_url="https://api.mistral.ai/v1",
-            ),
+            llm=llm,
             tts=cartesia.TTS(
                 model=CARTESIA_TTS_MODEL,
                 api_key=os.getenv("CARTESIA_API_KEY"),
