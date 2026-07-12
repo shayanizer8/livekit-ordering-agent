@@ -8,22 +8,38 @@ Built on [LiveKit Agents](https://docs.livekit.io/agents/), powered by **Mistral
 
 ## Architecture Overview
 
-```
-┌─────────────────────────┐          ┌──────────────────────────┐
-│   React Frontend (Vite) │◄────────►│  LiveKit Cloud (WebRTC)  │
-│   - Voice UI            │          │  - Real-time audio        │
-│   - Live cart panel     │          │  - Data channel (cart)    │
-│   - Transcription feed  │          └──────────┬───────────────┘
-└──────────┬──────────────┘                     │
-           │ HTTP /token                        │ WebSocket
-           ▼                                   ▼
-┌──────────────────────┐          ┌─────────────────────────────┐
-│  Token Server        │          │  Python Voice Agent         │
-│  (aiohttp :8080)     │          │  - Deepgram STT (nova-2)    │
-│  - Issues JWTs       │          │  - Mistral LLM (ministral)  │
-│  - Dispatches agent  │          │  - Cartesia TTS (sonic-3.5) │
-└──────────────────────┘          │  - Cart & Menu tools        │
-                                  └─────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Frontend Client [Frontend Client - React & Vite]
+        UI[React UI / Dashboard]
+        LKC[LiveKit Client SDK]
+        UI -->|Connects & Subscribes| LKC
+    end
+
+    subgraph Token Server [Token Server - aiohttp]
+        TS[token_server.py]
+    end
+
+    subgraph LiveKit Cloud [LiveKit SFU / Cloud]
+        SFU[LiveKit Server Room]
+    end
+
+    subgraph Backend Agent [Backend Service - Python]
+        AS[agent.py - AgentSession]
+        OA[agent.py - OrderingAgent]
+        CT[cart_tools.py]
+        MT[menu_tools.py]
+    end
+
+    UI -->|GET /token| TS
+    TS -->|Returns JWT Token| UI
+    LKC -->|Establishes WebRTC Audio + Data Channel| SFU
+    AS -->|Subscribes to Room Audio| SFU
+    OA -->|Publishes Cart Updates over Data Channel| SFU
+    SFU -->|Forwards Data Channel events| LKC
+    LKC -->|Updates React State| UI
+    OA -->|Calls Python Tools| CT
+    OA -->|Reads Menu| MT
 ```
 
 The frontend fetches a signed JWT from the **token server**, which also embeds an agent dispatch directive so LiveKit automatically assigns a Python worker to the new room. The agent handles all voice I/O and pushes cart state to the frontend in real time over a **data channel**.
